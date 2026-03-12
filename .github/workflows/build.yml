@@ -1,0 +1,74 @@
+name: Build Desktop (Linux + Windows)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone submodules
+        run: git submodule update --init --recursive
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: flutter build linux --release
+
+      - name: Build Windows
+        if: matrix.os == 'windows-latest'
+        run: flutter build windows --release
+
+      - name: Create Linux Deb Package
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p release
+          cp -r build/linux/x64/release/bundle quick-transfer
+          tar -czvf quick-transfer_1.0.0_linux.tar.gz quick-transfer
+
+      - name: Upload Linux artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundle
+          path: build/linux/x64/release/bundle
+
+      - name: Upload Windows artifact
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle
+          path: build/windows/x64/runner/Release
+
+      - name: Upload Deb
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            build/linux/x64/release/bundle/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows exe
+        if: matrix.os == 'windows-latest' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: build/windows/x64/runner/Release/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
