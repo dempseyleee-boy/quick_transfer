@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'dart:convert';
 
 void main() {
   runApp(const QuickTransferDesktop());
@@ -32,8 +33,9 @@ class ConnectedDevice {
   String name;
   String ip;
   DateTime? lastSeen;
+  String? deviceType;
 
-  ConnectedDevice({required this.name, required this.ip});
+  ConnectedDevice({required this.name, required this.ip, this.lastSeen, this.deviceType});
 }
 
 class HomePage extends StatefulWidget {
@@ -48,23 +50,140 @@ class _HomePageState extends State<HomePage> {
   ConnectedDevice? selectedDevice;
   String? localIP;
   final TextEditingController _messageController = TextEditingController();
+  final TextEditingController _clipboardController = TextEditingController();
   final List<Map<String, dynamic>> _messages = [];
   final List<Map<String, dynamic>> _transferHistory = [];
   HttpServer? _httpServer;
   final Map<String, List<Map<String, dynamic>>> _deviceMessages = {};
+  
+  // 自动连接相关
+  List<ConnectedDevice> _savedDevices = [];
+  Timer? _autoConnectTimer;
+  String? _currentWifiName;
+  
+  // 当前选中的标签页
+  int _selectedTab = 0; // 0: 消息, 1: 剪贴板, 2: 文件
 
   @override
   void initState() {
     super.initState();
     _getLocalIP();
     _startServer();
+    _loadSavedDevices();
+    _startAutoConnect();
+    _startClipboardMonitor();
   }
 
   @override
   void dispose() {
     _httpServer?.close();
     _messageController.dispose();
+    _clipboardController.dispose();
+    _autoConnectTimer?.cancel();
     super.dispose();
+  }
+
+  // 保存设备到本地文件
+  Future<void> _saveDevices() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/quick_transfer_devices.json');
+      final data = _savedDevices.map((d) => {
+        'name': d.name,
+        'ip': d.ip,
+        'lastSeen': d.lastSeen?.toIso8601String(),
+        'deviceType': d.deviceType,
+      }).toList();
+      await file.writeAsString(jsonEncode(data));
+    } catch (e) {
+      print('保存设备失败: $e');
+    }
+  }
+
+  // 加载已保存的设备
+  Future<void> _loadSavedDevices() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/quick_transfer_devices.json');
+      if (await file.exists()) {
+        final data = jsonDecode(await file.readAsString()) as List;
+        setState(() {
+          _savedDevices = data.map((d) => ConnectedDevice(
+            name: d['name'],
+            ip: d['ip'],
+            lastSeen: d['lastSeen'] != null ? DateTime.parse(d['lastSeen']) : null,
+            deviceType: d['deviceType'],
+          )).toList();
+        });
+      }
+    } catch (e) {
+      print('加载设备失败: $e');
+    }
+  }
+
+  // 自动连接定时器
+  void _startAutoConnect() {
+    _autoConnectTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _checkAutoConnect();
+    });
+  }
+
+  // 检查并自动连接
+  Future<void> _checkAutoConnect() async {
+    if (_savedDevices.isEmpty || localIP == null) return;
+    
+    for (var savedDevice in _savedDevices) {
+      try {
+        final result = await http.get(
+          Uri.parse('http://${savedDevice.ip}:8765/api/status'),
+        ).timeout(const Duration(milliseconds: 500));
+        
+        if (result.statusCode == 200) {
+          // 设备在线，自动连接
+          if (!devices.any((d) => d.ip == savedDevice.ip)) {
+            setState(() {
+              devices.add(ConnectedDevice(
+                name: savedDevice.name,
+                ip: savedDevice.ip,
+                lastSeen: DateTime.now(),
+                deviceType: savedDevice.deviceType,
+              ));
+            });
+            
+            // 更新最后连接时间
+            savedDevice.lastSeen = DateTime.now();
+            await _saveDevices();
+            
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('已自动连接: ${savedDevice.name}')),
+              );
+            }
+          }
+        }
+      } catch (e) {
+        // 设备不在线
+      }
+    }
+  }
+
+  // 剪贴板监控
+  String? _lastClipboardContent;
+  Timer? _clipboardMonitor;
+  
+  void _startClipboardMonitor() {
+    _clipboardMonitor = Timer.periodic(const Duration(seconds: 2), (_) async {
+      try {
+        final data = await Clipboard.getData(Clipboard.kTextPlain);
+        if (data?.text != null && data!.text != _lastClipboardContent && data.text!.isNotEmpty) {
+          setState(() {
+            _clipboardController.text = data.text!;
+          });
+        }
+      } catch (e) {
+        // 忽略
+      }
+    });
   }
 
   Future<void> _getLocalIP() async {
@@ -72,7 +191,7 @@ class _HomePageState extends State<HomePage> {
       final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
       for (var interface in interfaces) {
         for (var addr in interface.addresses) {
-          if (addr.address.startsWith('192.168.')) {
+          if (addr.address.startsWith('192.168.') || addr.address.startsWith('10.')) {
             setState(() {
               localIP = addr.address;
             });
@@ -116,7 +235,6 @@ class _HomePageState extends State<HomePage> {
         final data = jsonDecode(body);
         
         setState(() {
-          // 更新或添加设备
           final existingIndex = devices.indexWhere((d) => d.ip == ip);
           if (existingIndex >= 0) {
             devices[existingIndex].name = data['name'] ?? '手机';
@@ -125,7 +243,22 @@ class _HomePageState extends State<HomePage> {
             devices.add(ConnectedDevice(
               name: data['name'] ?? '手机',
               ip: ip ?? 'unknown',
+              deviceType: data['deviceType'],
             ));
+            
+            // 保存到已连接设备列表
+            final savedIndex = _savedDevices.indexWhere((d) => d.ip == ip);
+            if (savedIndex >= 0) {
+              _savedDevices[savedIndex].lastSeen = DateTime.now();
+            } else {
+              _savedDevices.add(ConnectedDevice(
+                name: data['name'] ?? '手机',
+                ip: ip ?? 'unknown',
+                lastSeen: DateTime.now(),
+                deviceType: data['deviceType'],
+              ));
+            }
+            _saveDevices();
           }
           if (selectedDevice == null && devices.isNotEmpty) {
             selectedDevice = devices.first;
@@ -138,7 +271,6 @@ class _HomePageState extends State<HomePage> {
         await request.response.close();
       }
       else if (uri == '/api/send') {
-        // 接收消息
         final body = await utf8.decodeStream(request);
         final data = jsonDecode(body);
         
@@ -155,7 +287,15 @@ class _HomePageState extends State<HomePage> {
           });
         }
         else if (type == 'clipboard') {
+          // 收到剪贴板，同步到系统剪贴板
           await Clipboard.setData(ClipboardData(text: data['content']));
+          _lastClipboardContent = data['content'];
+          
+          // 更新剪贴板面板
+          setState(() {
+            _clipboardController.text = data['content'];
+          });
+          
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('剪贴板已同步')),
@@ -172,10 +312,17 @@ class _HomePageState extends State<HomePage> {
         await request.response.close();
       }
       else if (uri == '/api/messages') {
-        // 拉取消息
         request.response.statusCode = 200;
         request.response.headers.set('Content-Type', 'application/json');
-        request.response.write(jsonEncode({'messages': []}));
+        request.response.write(jsonEncode({'messages': _deviceMessages[ip] ?? []}));
+        await request.response.close();
+      }
+      else if (uri == '/api/clipboard') {
+        // 获取当前剪贴板
+        final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
+        request.response.statusCode = 200;
+        request.response.headers.set('Content-Type', 'application/json');
+        request.response.write(jsonEncode({'content': clipboardData?.text ?? ''}));
         await request.response.close();
       }
       else {
@@ -207,6 +354,7 @@ class _HomePageState extends State<HomePage> {
           'direction': '接收',
           'time': DateTime.now().toString().substring(11, 19),
           'status': '完成',
+          'path': filePath,
         });
       });
       
@@ -220,10 +368,11 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // 发送剪贴板到手机
   Future<void> _sendClipboard() async {
     if (selectedDevice == null) return;
     
-    final text = _messageController.text;
+    final text = _clipboardController.text;
     if (text.isEmpty) return;
     
     try {
@@ -233,6 +382,8 @@ class _HomePageState extends State<HomePage> {
         body: jsonEncode({'type': 'clipboard', 'content': text}),
       );
       
+      _lastClipboardContent = text;
+      
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('剪贴板已发送')),
@@ -240,6 +391,36 @@ class _HomePageState extends State<HomePage> {
       }
     } catch (e) {
       print('发送失败: $e');
+    }
+  }
+
+  // 从系统读取剪贴板
+  Future<void> _readClipboard() async {
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      if (data?.text != null) {
+        setState(() {
+          _clipboardController.text = data!.text!;
+        });
+      }
+    } catch (e) {
+      print('读取剪贴板失败: $e');
+    }
+  }
+
+  // 复制到系统剪贴板
+  Future<void> _copyToSystemClipboard() async {
+    try {
+      await Clipboard.setData(ClipboardData(text: _clipboardController.text));
+      _lastClipboardContent = _clipboardController.text;
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已复制到剪贴板')),
+        );
+      }
+    } catch (e) {
+      print('复制失败: $e');
     }
   }
 
@@ -396,6 +577,35 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 8),
             const Text('请在手机端手动输入此 IP 进行连接',
               style: TextStyle(color: Colors.grey, fontSize: 12)),
+            const SizedBox(height: 16),
+            const Divider(),
+            const SizedBox(height: 8),
+            const Text('已保存的设备:', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 150,
+              child: _savedDevices.isEmpty
+                  ? const Center(child: Text('暂无保存的设备', style: TextStyle(color: Colors.grey)))
+                  : ListView.builder(
+                      itemCount: _savedDevices.length,
+                      itemBuilder: (context, index) {
+                        final device = _savedDevices[index];
+                        return ListTile(
+                          leading: const Icon(Icons.phone_android),
+                          title: Text(device.name),
+                          subtitle: Text(device.ip),
+                          trailing: device.lastSeen != null
+                              ? Text(_formatTime(device.lastSeen!))
+                              : null,
+                          onTap: () {
+                            Navigator.pop(context);
+                            // 尝试连接
+                            _tryConnectToDevice(device.ip);
+                          },
+                        );
+                      },
+                    ),
+            ),
           ],
         ),
         actions: [
@@ -406,6 +616,53 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
     );
+  }
+
+  String _formatTime(DateTime time) {
+    final now = DateTime.now();
+    final diff = now.difference(time);
+    if (diff.inMinutes < 1) return '刚刚';
+    if (diff.inHours < 1) return '${diff.inMinutes}分钟前';
+    if (diff.inDays < 1) return '${diff.inHours}小时前';
+    return '${diff.inDays}天前';
+  }
+
+  Future<void> _tryConnectToDevice(String ip) async {
+    try {
+      final result = await http.get(
+        Uri.parse('http://$ip:8765/api/status'),
+      ).timeout(const Duration(seconds: 2));
+      
+      if (result.statusCode == 200) {
+        final data = jsonDecode(result.body);
+        setState(() {
+          final existingIndex = devices.indexWhere((d) => d.ip == ip);
+          if (existingIndex >= 0) {
+            selectedDevice = devices[existingIndex];
+          } else {
+            final device = ConnectedDevice(
+              name: data['name'] ?? '设备',
+              ip: ip,
+              lastSeen: DateTime.now(),
+            );
+            devices.add(device);
+            selectedDevice = device;
+          }
+        });
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('已连接到 $ip')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('连接失败: $e')),
+        );
+      }
+    }
   }
 
   @override
@@ -452,6 +709,19 @@ class _HomePageState extends State<HomePage> {
                 Text('我的 IP: ${localIP ?? "获取中..."}', 
                   style: const TextStyle(fontWeight: FontWeight.bold)),
                 const Spacer(),
+                if (_savedDevices.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.blue[100],
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${_savedDevices.length}个已保存设备',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                const SizedBox(width: 8),
                 TextButton.icon(
                   onPressed: _showManualConnectDialog,
                   icon: const Icon(Icons.info_outline, size: 16),
@@ -490,6 +760,12 @@ class _HomePageState extends State<HomePage> {
                                     textAlign: TextAlign.center,
                                     style: TextStyle(color: Colors.grey),
                                   ),
+                                  const SizedBox(height: 16),
+                                  if (_savedDevices.isNotEmpty)
+                                    TextButton(
+                                      onPressed: _checkAutoConnect,
+                                      child: const Text('点击尝试自动连接'),
+                                    ),
                                 ],
                               ),
                             )
@@ -501,7 +777,7 @@ class _HomePageState extends State<HomePage> {
                                 return ListTile(
                                   leading: const Icon(Icons.phone_android),
                                   title: Text(device.name),
-                                  subtitle: const Text('已连接'),
+                                  subtitle: Text(device.ip),
                                   selected: isSelected,
                                   selectedTileColor: Colors.blue[50],
                                   onTap: () {
@@ -521,6 +797,7 @@ class _HomePageState extends State<HomePage> {
               Expanded(
                 child: Column(
                   children: [
+                    // 功能按钮
                     if (selectedDevice != null)
                       Container(
                         padding: const EdgeInsets.all(8),
@@ -528,12 +805,16 @@ class _HomePageState extends State<HomePage> {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
-                            _buildFeatureButton(Icons.content_paste, '剪贴板', _sendClipboard),
+                            _buildFeatureButton(Icons.chat, '消息', () => setState(() => _selectedTab = 0)),
+                            _buildFeatureButton(Icons.content_paste, '剪贴板', () => setState(() => _selectedTab = 1)),
+                            _buildFeatureButton(Icons.folder, '文件', () => setState(() => _selectedTab = 2)),
                             _buildFeatureButton(Icons.screenshot_monitor, '投屏', _sendScreenshot),
                             _buildFeatureButton(Icons.attach_file, '发文件', _sendFile),
                           ],
                         ),
                       ),
+                    
+                    // 内容区域
                     Expanded(
                       child: selectedDevice == null
                           ? Center(
@@ -547,45 +828,10 @@ class _HomePageState extends State<HomePage> {
                                 ],
                               ),
                             )
-                          : ListView.builder(
-                              padding: const EdgeInsets.all(16),
-                              itemCount: _messages.length,
-                              itemBuilder: (context, index) {
-                                final msg = _messages[index];
-                                return Align(
-                                  alignment: msg['isMine'] 
-                                      ? Alignment.centerRight 
-                                      : Alignment.centerLeft,
-                                  child: Container(
-                                    margin: const EdgeInsets.symmetric(vertical: 4),
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: msg['isMine'] ? Colors.blue : Colors.grey[200],
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          msg['content'],
-                                          style: TextStyle(
-                                            color: msg['isMine'] ? Colors.white : Colors.black,
-                                          ),
-                                        ),
-                                        Text(
-                                          msg['time'],
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            color: msg['isMine'] ? Colors.white70 : Colors.grey,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
+                          : _buildContentPanel(),
                     ),
+                    
+                    // 消息输入框（始终显示）
                     if (selectedDevice != null)
                       Container(
                         padding: const EdgeInsets.all(8),
@@ -679,15 +925,240 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _buildContentPanel() {
+    switch (_selectedTab) {
+      case 0:
+        return _buildMessagePanel();
+      case 1:
+        return _buildClipboardPanel();
+      case 2:
+        return _buildFilePanel();
+      default:
+        return _buildMessagePanel();
+    }
+  }
+
+  Widget _buildMessagePanel() {
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: _messages.length,
+      itemBuilder: (context, index) {
+        final msg = _messages[index];
+        return Align(
+          alignment: msg['isMine'] 
+              ? Alignment.centerRight 
+              : Alignment.centerLeft,
+          child: Container(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: msg['isMine'] ? Colors.blue : Colors.grey[200],
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  msg['content'],
+                  style: TextStyle(
+                    color: msg['isMine'] ? Colors.white : Colors.black,
+                  ),
+                ),
+                Text(
+                  msg['time'],
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: msg['isMine'] ? Colors.white70 : Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildClipboardPanel() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.content_paste, size: 20),
+              const SizedBox(width: 8),
+              const Text('剪贴板', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                onPressed: _readClipboard,
+                tooltip: '刷新',
+              ),
+              IconButton(
+                icon: const Icon(Icons.copy),
+                onPressed: _copyToSystemClipboard,
+                tooltip: '复制到系统剪贴板',
+              ),
+              ElevatedButton.icon(
+                onPressed: _sendClipboard,
+                icon: const Icon(Icons.send, size: 16),
+                label: const Text('发送到手机'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey[100],
+                border: Border.all(color: Colors.grey[300]!),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: TextField(
+                controller: _clipboardController,
+                maxLines: null,
+                expands: true,
+                decoration: const InputDecoration(
+                  hintText: '点击"刷新"读取剪贴板内容，或直接输入文本...',
+                  border: InputBorder.none,
+                ),
+                style: const TextStyle(fontSize: 14),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text('💡 手机发送的剪贴板内容会自动显示在这里',
+            style: TextStyle(color: Colors.grey, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilePanel() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.folder, size: 20),
+              const SizedBox(width: 8),
+              const Text('文件管理', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Spacer(),
+              ElevatedButton.icon(
+                onPressed: _sendFile,
+                icon: const Icon(Icons.upload_file, size: 16),
+                label: const Text('发送文件'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: _transferHistory.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.folder_open, size: 64, color: Colors.grey),
+                        const SizedBox(height: 8),
+                        const Text('暂无文件',
+                          style: TextStyle(color: Colors.grey)),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: _sendFile,
+                          icon: const Icon(Icons.add),
+                          label: const Text('发送文件'),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _transferHistory.length,
+                    itemBuilder: (context, index) {
+                      final item = _transferHistory[index];
+                      return Card(
+                        child: ListTile(
+                          leading: Icon(
+                            _getFileIcon(item['name']),
+                            color: Colors.blue,
+                            size: 40,
+                          ),
+                          title: Text(item['name']),
+                          subtitle: Text('${item['size']} • ${item['time']} • ${item['direction']}'),
+                          trailing: item['status'] == '完成' && item['path'] != null
+                              ? IconButton(
+                                  icon: const Icon(Icons.folder_open),
+                                  onPressed: () {
+                                    Process.run('xdg-open', [item['path']]);
+                                  },
+                                  tooltip: '打开位置',
+                                )
+                              : null,
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  IconData _getFileIcon(String fileName) {
+    final ext = fileName.split('.').last.toLowerCase();
+    switch (ext) {
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+      case 'gif':
+      case 'bmp':
+      case 'webp':
+        return Icons.image;
+      case 'mp4':
+      case 'avi':
+      case 'mkv':
+      case 'mov':
+        return Icons.video_file;
+      case 'mp3':
+      case 'wav':
+      case 'flac':
+      case 'aac':
+        return Icons.audio_file;
+      case 'pdf':
+        return Icons.picture_as_pdf;
+      case 'doc':
+      case 'docx':
+        return Icons.description;
+      case 'xls':
+      case 'xlsx':
+        return Icons.table_chart;
+      case 'zip':
+      case 'rar':
+      case '7z':
+      case 'tar':
+      case 'gz':
+        return Icons.folder_zip;
+      default:
+        return Icons.insert_drive_file;
+    }
+  }
+
   Widget _buildFeatureButton(IconData icon, String label, VoidCallback onTap) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: Colors.blue),
+            Icon(icon, color: _selectedTab == 0 && label == '消息' || 
+                               _selectedTab == 1 && label == '剪贴板' || 
+                               _selectedTab == 2 && label == '文件'
+                ? Colors.blue[700] : Colors.blue),
             const SizedBox(height: 4),
             Text(label, style: const TextStyle(fontSize: 12)),
           ],
