@@ -2,7 +2,7 @@
 Type=Application
 Name=快传
 Comment=快传 - 手机电脑互传文件
-Exec=/home/ubuntu/.openclaw/workspace/quick_transfer/quick_transfer_desktop/build/linux/x64/release/bundle/quick_transfer_desktop
+Exec=quick_transfer
 Icon=phone
 Terminal=false
 Categories=Network;Utility;
