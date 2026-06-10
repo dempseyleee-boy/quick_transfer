@@ -1,107 +1,65 @@
 # Quick Transfer
 
-Quick Transfer is a Flutter desktop + Android LAN transfer tool. It supports
-messages, clipboard text, and file transfer between a Linux desktop and an
-Android phone on the same local network.
+Quick Transfer is a local network transfer app for Linux and Android. This
+first release provides a simple way to exchange messages, clipboard text, and
+files between a desktop computer and a phone on the same network.
 
 ## Features
 
-- Linux desktop app and Android mobile app.
-- Device discovery and manual IP connection.
-- Desktop-to-phone direct push through `POST /api/send`.
-- Fallback queue on the desktop when the phone is temporarily unreachable.
-- Phone polling through `/api/messages` to drain queued desktop payloads.
-- Clipboard, text message, and file transfer.
-- Android-side local HTTP receiver on port `8765`.
+- Linux desktop and Android applications
+- Automatic device discovery on the local network
+- Manual connection by IP address
+- Text message and clipboard transfer
+- File transfer between connected devices
+- Desktop delivery queue when the phone is temporarily unavailable
 
-## Current Scope
+## Requirements
 
-Screen casting is not implemented yet. A previous placeholder button was
-removed because it only attempted a one-off desktop screenshot and the Android
-app did not handle that payload type.
+- Linux desktop
+- Android phone
+- Both devices connected to the same LAN or Wi-Fi network
 
-## Network Model
+## Getting Started
 
-Both devices must be on the same LAN/Wi-Fi network for normal transfer.
+1. Install and start Quick Transfer on the Linux desktop.
+2. Install and start the Android app.
+3. Keep both devices on the same network.
+4. Select the discovered device or enter its IP address manually.
+5. Open the appropriate tab to send a message, clipboard text, or file.
 
-The Android app listens on:
+## Build From Source
 
-```text
-http://<phone-ip>:8765
-```
+Quick Transfer is built with Flutter 3.24.5.
 
-Useful smoke checks:
-
-```bash
-curl http://<phone-ip>:8765/api/status
-curl -X POST http://<phone-ip>:8765/api/send \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"clipboard","content":"hello"}'
-```
-
-For USB-only debugging, forward the Android receiver:
+Build the Linux desktop application:
 
 ```bash
-adb forward tcp:18765 tcp:8765
-curl http://127.0.0.1:18765/api/status
+flutter pub get
+flutter build linux
 ```
 
-## Desktop Development
-
-Use Flutter 3.24.5 or compatible.
-
-On Linux, Flutter expects `clang++` and `ninja`. If the host only has `g++`, a
-temporary local shim can be used:
-
-```bash
-mkdir -p toolbin
-ln -sf /usr/bin/g++ toolbin/clang++
-PATH="$PWD/toolbin:$PATH" flutter run -d linux
-```
-
-Run checks:
-
-```bash
-flutter test
-flutter analyze
-```
-
-## Android Development
-
-The mobile app is under `mobile/`.
-
-Build debug APK:
+Build the Android application:
 
 ```bash
 cd mobile
 flutter pub get
-flutter build apk --debug
+flutter build apk
 ```
 
-Install:
+## Development
 
 ```bash
-adb install -r build/app/outputs/flutter-apk/app-debug.apk
+flutter test
+flutter analyze
+
+cd mobile
+flutter test
+flutter analyze
 ```
 
-If an existing app was installed with a different signature, uninstall first:
+The Android app runs a local HTTP receiver on port `8765`. You can verify a
+connected phone with:
 
 ```bash
-adb uninstall com.quicktransfer.quick_transfer_mobile
+curl http://<phone-ip>:8765/api/status
 ```
-
-## Verified
-
-- Desktop tests pass.
-- Desktop analyze reports no issues.
-- Android debug APK builds.
-- Android APK installs and starts on a vivo V2405A.
-- USB-forwarded and LAN `/api/status` and `/api/send` smoke tests pass.
-
-## Notes
-
-- The Android debug build uses Android Gradle Plugin `8.5.1`, Gradle `8.7`,
-  and `compileSdk = 35`.
-- `android:usesCleartextTraffic="true"` is enabled for LAN HTTP transfer.
-- See `docs/superpowers/plans/2026-06-11-quick-transfer-recovery.md` for the
-  recovery and verification plan used during this update.
