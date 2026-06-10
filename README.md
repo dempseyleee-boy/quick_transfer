@@ -63,3 +63,7 @@ connected phone with:
 ```bash
 curl http://<phone-ip>:8765/api/status
 ```
+
+## Documentation
+
+- [Cross-platform expansion guide](docs/platform-expansion-guide.md)
