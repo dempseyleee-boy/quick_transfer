@@ -7,7 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
-import 'dart:convert';
+import 'package:quick_transfer_desktop/transfer_queue.dart';
 
 void main() {
   runApp(const QuickTransferDesktop());
@@ -35,7 +35,8 @@ class ConnectedDevice {
   DateTime? lastSeen;
   String? deviceType;
 
-  ConnectedDevice({required this.name, required this.ip, this.lastSeen, this.deviceType});
+  ConnectedDevice(
+      {required this.name, required this.ip, this.lastSeen, this.deviceType});
 }
 
 class HomePage extends StatefulWidget {
@@ -54,13 +55,12 @@ class _HomePageState extends State<HomePage> {
   final List<Map<String, dynamic>> _messages = [];
   final List<Map<String, dynamic>> _transferHistory = [];
   HttpServer? _httpServer;
-  final Map<String, List<Map<String, dynamic>>> _deviceMessages = {};
-  
+  final TransferQueue _pendingMessages = TransferQueue();
+
   // 自动连接相关
   List<ConnectedDevice> _savedDevices = [];
   Timer? _autoConnectTimer;
-  String? _currentWifiName;
-  
+
   // 当前选中的标签页
   int _selectedTab = 0; // 0: 消息, 1: 剪贴板, 2: 文件
 
@@ -80,6 +80,7 @@ class _HomePageState extends State<HomePage> {
     _messageController.dispose();
     _clipboardController.dispose();
     _autoConnectTimer?.cancel();
+    _clipboardMonitor?.cancel();
     super.dispose();
   }
 
@@ -88,12 +89,14 @@ class _HomePageState extends State<HomePage> {
     try {
       final dir = await getApplicationDocumentsDirectory();
       final file = File('${dir.path}/quick_transfer_devices.json');
-      final data = _savedDevices.map((d) => {
-        'name': d.name,
-        'ip': d.ip,
-        'lastSeen': d.lastSeen?.toIso8601String(),
-        'deviceType': d.deviceType,
-      }).toList();
+      final data = _savedDevices
+          .map((d) => {
+                'name': d.name,
+                'ip': d.ip,
+                'lastSeen': d.lastSeen?.toIso8601String(),
+                'deviceType': d.deviceType,
+              })
+          .toList();
       await file.writeAsString(jsonEncode(data));
     } catch (e) {
       print('保存设备失败: $e');
@@ -108,12 +111,16 @@ class _HomePageState extends State<HomePage> {
       if (await file.exists()) {
         final data = jsonDecode(await file.readAsString()) as List;
         setState(() {
-          _savedDevices = data.map((d) => ConnectedDevice(
-            name: d['name'],
-            ip: d['ip'],
-            lastSeen: d['lastSeen'] != null ? DateTime.parse(d['lastSeen']) : null,
-            deviceType: d['deviceType'],
-          )).toList();
+          _savedDevices = data
+              .map((d) => ConnectedDevice(
+                    name: d['name'],
+                    ip: d['ip'],
+                    lastSeen: d['lastSeen'] != null
+                        ? DateTime.parse(d['lastSeen'])
+                        : null,
+                    deviceType: d['deviceType'],
+                  ))
+              .toList();
         });
       }
     } catch (e) {
@@ -131,13 +138,15 @@ class _HomePageState extends State<HomePage> {
   // 检查并自动连接
   Future<void> _checkAutoConnect() async {
     if (_savedDevices.isEmpty || localIP == null) return;
-    
+
     for (var savedDevice in _savedDevices) {
       try {
-        final result = await http.get(
-          Uri.parse('http://${savedDevice.ip}:8765/api/status'),
-        ).timeout(const Duration(milliseconds: 500));
-        
+        final result = await http
+            .get(
+              Uri.parse('http://${savedDevice.ip}:8765/api/status'),
+            )
+            .timeout(const Duration(milliseconds: 500));
+
         if (result.statusCode == 200) {
           // 设备在线，自动连接
           if (!devices.any((d) => d.ip == savedDevice.ip)) {
@@ -149,11 +158,11 @@ class _HomePageState extends State<HomePage> {
                 deviceType: savedDevice.deviceType,
               ));
             });
-            
+
             // 更新最后连接时间
             savedDevice.lastSeen = DateTime.now();
             await _saveDevices();
-            
+
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('已自动连接: ${savedDevice.name}')),
@@ -170,12 +179,14 @@ class _HomePageState extends State<HomePage> {
   // 剪贴板监控
   String? _lastClipboardContent;
   Timer? _clipboardMonitor;
-  
+
   void _startClipboardMonitor() {
     _clipboardMonitor = Timer.periodic(const Duration(seconds: 2), (_) async {
       try {
         final data = await Clipboard.getData(Clipboard.kTextPlain);
-        if (data?.text != null && data!.text != _lastClipboardContent && data.text!.isNotEmpty) {
+        if (data?.text != null &&
+            data!.text != _lastClipboardContent &&
+            data.text!.isNotEmpty) {
           setState(() {
             _clipboardController.text = data.text!;
           });
@@ -188,10 +199,12 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _getLocalIP() async {
     try {
-      final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
+      final interfaces =
+          await NetworkInterface.list(type: InternetAddressType.IPv4);
       for (var interface in interfaces) {
         for (var addr in interface.addresses) {
-          if (addr.address.startsWith('192.168.') || addr.address.startsWith('10.')) {
+          if (addr.address.startsWith('192.168.') ||
+              addr.address.startsWith('10.')) {
             setState(() {
               localIP = addr.address;
             });
@@ -208,7 +221,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _startServer() async {
     try {
       _httpServer = await HttpServer.bind(InternetAddress.anyIPv4, 8765);
-      
+
       await for (HttpRequest request in _httpServer!) {
         _handleRequest(request);
       }
@@ -221,19 +234,20 @@ class _HomePageState extends State<HomePage> {
   Future<void> _handleRequest(HttpRequest request) async {
     final uri = request.uri.path;
     final ip = request.connectionInfo?.remoteAddress.address;
-    
+
     try {
       if (uri == '/api/status') {
         request.response.statusCode = 200;
-        request.response.headers.set('Content-Type', 'application/json; charset=utf-8');
-        request.response.write(jsonEncode({'name': 'Ubuntu PC', 'type': 'desktop'}));
+        request.response.headers
+            .set('Content-Type', 'application/json; charset=utf-8');
+        request.response
+            .write(jsonEncode({'name': 'Ubuntu PC', 'type': 'desktop'}));
         await request.response.close();
-      }
-      else if (uri == '/api/connect') {
+      } else if (uri == '/api/connect') {
         // 手机连接
         final body = await utf8.decodeStream(request);
         final data = jsonDecode(body);
-        
+
         setState(() {
           final existingIndex = devices.indexWhere((d) => d.ip == ip);
           if (existingIndex >= 0) {
@@ -245,7 +259,7 @@ class _HomePageState extends State<HomePage> {
               ip: ip ?? 'unknown',
               deviceType: data['deviceType'],
             ));
-            
+
             // 保存到已连接设备列表
             final savedIndex = _savedDevices.indexWhere((d) => d.ip == ip);
             if (savedIndex >= 0) {
@@ -264,18 +278,17 @@ class _HomePageState extends State<HomePage> {
             selectedDevice = devices.first;
           }
         });
-        
+
         request.response.statusCode = 200;
         request.response.headers.set('Content-Type', 'application/json');
         request.response.write(jsonEncode({'status': 'ok'}));
         await request.response.close();
-      }
-      else if (uri == '/api/send') {
+      } else if (uri == '/api/send') {
         final body = await utf8.decodeStream(request);
         final data = jsonDecode(body);
-        
+
         final type = data['type'];
-        
+
         if (type == 'text') {
           setState(() {
             _messages.add({
@@ -285,47 +298,61 @@ class _HomePageState extends State<HomePage> {
               'isMine': false,
             });
           });
-        }
-        else if (type == 'clipboard') {
+        } else if (type == 'clipboard') {
           // 收到剪贴板，同步到系统剪贴板
           await Clipboard.setData(ClipboardData(text: data['content']));
           _lastClipboardContent = data['content'];
-          
+
           // 更新剪贴板面板
           setState(() {
             _clipboardController.text = data['content'];
           });
-          
+
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('剪贴板已同步')),
             );
           }
-        }
-        else if (type == 'file') {
+        } else if (type == 'file') {
           _receiveFile(data);
         }
-        
+
         request.response.statusCode = 200;
         request.response.headers.set('Content-Type', 'application/json');
         request.response.write(jsonEncode({'status': 'ok'}));
         await request.response.close();
-      }
-      else if (uri == '/api/messages') {
+      } else if (uri == '/api/messages') {
+        final messages =
+            ip == null ? <Map<String, dynamic>>[] : _pendingMessages.drain(ip);
+        if (messages.isNotEmpty && mounted) {
+          setState(() {
+            for (final message in messages) {
+              if (message['type'] == 'file') {
+                final index = _transferHistory
+                    .indexWhere((h) => h['name'] == message['fileName']);
+                if (index != -1) {
+                  _transferHistory[index]['status'] = '手机已拉取';
+                }
+              }
+            }
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('手机已拉取 ${messages.length} 条待发送内容')),
+          );
+        }
         request.response.statusCode = 200;
         request.response.headers.set('Content-Type', 'application/json');
-        request.response.write(jsonEncode({'messages': _deviceMessages[ip] ?? []}));
+        request.response.write(jsonEncode({'messages': messages}));
         await request.response.close();
-      }
-      else if (uri == '/api/clipboard') {
+      } else if (uri == '/api/clipboard') {
         // 获取当前剪贴板
         final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
         request.response.statusCode = 200;
         request.response.headers.set('Content-Type', 'application/json');
-        request.response.write(jsonEncode({'content': clipboardData?.text ?? ''}));
+        request.response
+            .write(jsonEncode({'content': clipboardData?.text ?? ''}));
         await request.response.close();
-      }
-      else {
+      } else {
         request.response.statusCode = 404;
         await request.response.close();
       }
@@ -341,12 +368,12 @@ class _HomePageState extends State<HomePage> {
       final fileName = msg['fileName'];
       final fileSize = msg['fileSize'];
       final base64Data = msg['data'];
-      
+
       final downloadsDir = await getDownloadsDirectory();
       final filePath = p.join(downloadsDir!.path, fileName);
       final file = File(filePath);
       await file.writeAsBytes(base64Decode(base64Data));
-      
+
       setState(() {
         _transferHistory.insert(0, {
           'name': fileName,
@@ -357,7 +384,7 @@ class _HomePageState extends State<HomePage> {
           'path': filePath,
         });
       });
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('文件已保存到: $filePath')),
@@ -368,30 +395,54 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<bool> _sendDirect(
+      ConnectedDevice device, Map<String, dynamic> payload) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('http://${device.ip}:8765/api/send'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 5));
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } catch (e) {
+      print('直接发送失败，准备进入待发送队列: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _deliverToSelectedDevice(Map<String, dynamic> payload) async {
+    final device = selectedDevice;
+    if (device == null) return false;
+
+    final delivered = await _sendDirect(device, payload);
+    if (!delivered) {
+      _pendingMessages.enqueue(device.ip, payload);
+    }
+    return delivered;
+  }
+
+  void _showDeliverySnackBar(bool delivered) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(delivered ? '已直接发送' : '手机暂不可达，已加入待发送队列'),
+      ),
+    );
+  }
+
   // 发送剪贴板到手机
   Future<void> _sendClipboard() async {
     if (selectedDevice == null) return;
-    
+
     final text = _clipboardController.text;
     if (text.isEmpty) return;
-    
-    try {
-      await http.post(
-        Uri.parse('http://${selectedDevice!.ip}:8765/api/send'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'type': 'clipboard', 'content': text}),
-      );
-      
-      _lastClipboardContent = text;
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('剪贴板已发送')),
-        );
-      }
-    } catch (e) {
-      print('发送失败: $e');
-    }
+
+    final delivered =
+        await _deliverToSelectedDevice({'type': 'clipboard', 'content': text});
+    _lastClipboardContent = text;
+    _showDeliverySnackBar(delivered);
   }
 
   // 从系统读取剪贴板
@@ -413,7 +464,7 @@ class _HomePageState extends State<HomePage> {
     try {
       await Clipboard.setData(ClipboardData(text: _clipboardController.text));
       _lastClipboardContent = _clipboardController.text;
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('已复制到剪贴板')),
@@ -424,68 +475,25 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _sendScreenshot() async {
-    if (selectedDevice == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先选择设备')),
-      );
-      return;
-    }
-    
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final screenshotPath = '${tempDir.path}/screenshot.png';
-      
-      await Process.run('gnome-screenshot', ['-f', screenshotPath]);
-      
-      final file = File(screenshotPath);
-      if (await file.exists()) {
-        final bytes = await file.readAsBytes();
-        final base64Data = base64Encode(bytes);
-        
-        await http.post(
-          Uri.parse('http://${selectedDevice!.ip}:8765/api/send'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'type': 'screenshot', 'data': base64Data}),
-        );
-        
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('截图已发送')),
-          );
-        }
-        
-        await file.delete();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('截屏失败: $e')),
-        );
-      }
-    }
-  }
-
   Future<void> _sendText() async {
     if (_messageController.text.isEmpty || selectedDevice == null) return;
-    
+
     try {
-      await http.post(
-        Uri.parse('http://${selectedDevice!.ip}:8765/api/send'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'type': 'text', 'content': _messageController.text}),
-      );
-      
+      final content = _messageController.text;
+      final delivered =
+          await _deliverToSelectedDevice({'type': 'text', 'content': content});
+
       setState(() {
         _messages.add({
           'from': '我',
-          'content': _messageController.text,
+          'content': content,
           'time': DateTime.now().toString().substring(11, 19),
           'isMine': true,
         });
       });
-      
+
       _messageController.clear();
+      _showDeliverySnackBar(delivered);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -502,14 +510,14 @@ class _HomePageState extends State<HomePage> {
       );
       return;
     }
-    
+
     final result = await FilePicker.platform.pickFiles();
     if (result == null || result.files.isEmpty) return;
-    
+
     final file = File(result.files.single.path!);
     final fileName = result.files.single.name;
     final fileSize = result.files.single.size;
-    
+
     setState(() {
       _transferHistory.insert(0, {
         'name': fileName,
@@ -519,34 +527,26 @@ class _HomePageState extends State<HomePage> {
         'status': '传输中',
       });
     });
-    
+
     try {
       final bytes = await file.readAsBytes();
       final base64Data = base64Encode(bytes);
-      
-      await http.post(
-        Uri.parse('http://${selectedDevice!.ip}:8765/api/send'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'type': 'file',
-          'fileName': fileName,
-          'fileSize': fileSize,
-          'data': base64Data,
-        }),
-      );
-      
+
+      final delivered = await _deliverToSelectedDevice({
+        'type': 'file',
+        'fileName': fileName,
+        'fileSize': fileSize,
+        'data': base64Data,
+      });
+
       setState(() {
         final index = _transferHistory.indexWhere((h) => h['name'] == fileName);
         if (index != -1) {
-          _transferHistory[index]['status'] = '完成';
+          _transferHistory[index]['status'] = delivered ? '完成' : '待手机拉取';
         }
       });
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('文件发送成功')),
-        );
-      }
+
+      _showDeliverySnackBar(delivered);
     } catch (e) {
       setState(() {
         final index = _transferHistory.indexWhere((h) => h['name'] == fileName);
@@ -560,7 +560,9 @@ class _HomePageState extends State<HomePage> {
   String _formatFileSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
@@ -572,20 +574,24 @@ class _HomePageState extends State<HomePage> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('我的 IP: ${localIP ?? "获取中..."}', 
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            Text('我的 IP: ${localIP ?? "获取中..."}',
+                style:
+                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
             const SizedBox(height: 8),
             const Text('请在手机端手动输入此 IP 进行连接',
-              style: TextStyle(color: Colors.grey, fontSize: 12)),
+                style: TextStyle(color: Colors.grey, fontSize: 12)),
             const SizedBox(height: 16),
             const Divider(),
             const SizedBox(height: 8),
-            const Text('已保存的设备:', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text('已保存的设备:',
+                style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             SizedBox(
               height: 150,
               child: _savedDevices.isEmpty
-                  ? const Center(child: Text('暂无保存的设备', style: TextStyle(color: Colors.grey)))
+                  ? const Center(
+                      child:
+                          Text('暂无保存的设备', style: TextStyle(color: Colors.grey)))
                   : ListView.builder(
                       itemCount: _savedDevices.length,
                       itemBuilder: (context, index) {
@@ -629,10 +635,12 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _tryConnectToDevice(String ip) async {
     try {
-      final result = await http.get(
-        Uri.parse('http://$ip:8765/api/status'),
-      ).timeout(const Duration(seconds: 2));
-      
+      final result = await http
+          .get(
+            Uri.parse('http://$ip:8765/api/status'),
+          )
+          .timeout(const Duration(seconds: 2));
+
       if (result.statusCode == 200) {
         final data = jsonDecode(result.body);
         setState(() {
@@ -649,7 +657,7 @@ class _HomePageState extends State<HomePage> {
             selectedDevice = device;
           }
         });
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('已连接到 $ip')),
@@ -668,7 +676,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final isConnected = devices.isNotEmpty;
-    
+
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -706,12 +714,13 @@ class _HomePageState extends State<HomePage> {
               children: [
                 const Icon(Icons.wifi, size: 20),
                 const SizedBox(width: 8),
-                Text('我的 IP: ${localIP ?? "获取中..."}', 
-                  style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text('我的 IP: ${localIP ?? "获取中..."}',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
                 const Spacer(),
                 if (_savedDevices.isNotEmpty)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
                       color: Colors.blue[100],
                       borderRadius: BorderRadius.circular(10),
@@ -730,195 +739,212 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
-          
-          Row(
-            children: [
-              SizedBox(
-                width: 250,
-                child: Column(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      color: Colors.grey[100],
-                      child: Row(
-                        children: [
-                          const Icon(Icons.phone_android),
-                          const SizedBox(width: 8),
-                          const Text('已连接设备', style: TextStyle(fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                    ),
-                    Expanded(
-                      child: devices.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  const Icon(Icons.cloud_off, size: 48, color: Colors.grey),
-                                  const SizedBox(height: 8),
-                                  const Text('等待手机连接...\n让手机输入本机 IP 连接',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Colors.grey),
-                                  ),
-                                  const SizedBox(height: 16),
-                                  if (_savedDevices.isNotEmpty)
-                                    TextButton(
-                                      onPressed: _checkAutoConnect,
-                                      child: const Text('点击尝试自动连接'),
-                                    ),
-                                ],
-                              ),
-                            )
-                          : ListView.builder(
-                              itemCount: devices.length,
-                              itemBuilder: (context, index) {
-                                final device = devices[index];
-                                final isSelected = selectedDevice?.ip == device.ip;
-                                return ListTile(
-                                  leading: const Icon(Icons.phone_android),
-                                  title: Text(device.name),
-                                  subtitle: Text(device.ip),
-                                  selected: isSelected,
-                                  selectedTileColor: Colors.blue[50],
-                                  onTap: () {
-                                    setState(() {
-                                      selectedDevice = device;
-                                    });
-                                  },
-                                );
-                              },
-                            ),
-                    ),
-                  ],
-                ),
-              ),
-              const VerticalDivider(width: 1),
-              
-              Expanded(
-                child: Column(
-                  children: [
-                    // 功能按钮
-                    if (selectedDevice != null)
+          Expanded(
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 250,
+                  child: Column(
+                    children: [
                       Container(
-                        padding: const EdgeInsets.all(8),
-                        color: Colors.grey[50],
+                        padding: const EdgeInsets.all(16),
+                        color: Colors.grey[100],
                         child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
-                            _buildFeatureButton(Icons.chat, '消息', () => setState(() => _selectedTab = 0)),
-                            _buildFeatureButton(Icons.content_paste, '剪贴板', () => setState(() => _selectedTab = 1)),
-                            _buildFeatureButton(Icons.folder, '文件', () => setState(() => _selectedTab = 2)),
-                            _buildFeatureButton(Icons.screenshot_monitor, '投屏', _sendScreenshot),
-                            _buildFeatureButton(Icons.attach_file, '发文件', _sendFile),
+                            const Icon(Icons.phone_android),
+                            const SizedBox(width: 8),
+                            const Text('已连接设备',
+                                style: TextStyle(fontWeight: FontWeight.bold)),
                           ],
                         ),
                       ),
-                    
-                    // 内容区域
-                    Expanded(
-                      child: selectedDevice == null
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  const Icon(Icons.link_off, size: 64, color: Colors.grey),
-                                  const SizedBox(height: 16),
-                                  const Text('请先连接设备',
-                                    style: TextStyle(color: Colors.grey, fontSize: 18)),
-                                ],
-                              ),
-                            )
-                          : _buildContentPanel(),
-                    ),
-                    
-                    // 消息输入框（始终显示）
-                    if (selectedDevice != null)
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Colors.grey[100],
-                          border: Border(top: BorderSide(color: Colors.grey[300]!)),
-                        ),
-                        child: Row(
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.attach_file),
-                              onPressed: _sendFile,
-                              tooltip: '发送文件',
-                            ),
-                            Expanded(
-                              child: TextField(
-                                controller: _messageController,
-                                decoration: const InputDecoration(
-                                  hintText: '输入消息...',
-                                  border: OutlineInputBorder(),
-                                  contentPadding: EdgeInsets.symmetric(horizontal: 12),
+                      Expanded(
+                        child: devices.isEmpty
+                            ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(Icons.cloud_off,
+                                        size: 48, color: Colors.grey),
+                                    const SizedBox(height: 8),
+                                    const Text(
+                                      '等待手机连接...\n让手机输入本机 IP 连接',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(color: Colors.grey),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    if (_savedDevices.isNotEmpty)
+                                      TextButton(
+                                        onPressed: _checkAutoConnect,
+                                        child: const Text('点击尝试自动连接'),
+                                      ),
+                                  ],
                                 ),
-                                onSubmitted: (_) => _sendText(),
+                              )
+                            : ListView.builder(
+                                itemCount: devices.length,
+                                itemBuilder: (context, index) {
+                                  final device = devices[index];
+                                  final isSelected =
+                                      selectedDevice?.ip == device.ip;
+                                  return ListTile(
+                                    leading: const Icon(Icons.phone_android),
+                                    title: Text(device.name),
+                                    subtitle: Text(device.ip),
+                                    selected: isSelected,
+                                    selectedTileColor: Colors.blue[50],
+                                    onTap: () {
+                                      setState(() {
+                                        selectedDevice = device;
+                                      });
+                                    },
+                                  );
+                                },
                               ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.send),
-                              onPressed: _sendText,
-                              tooltip: '发送',
-                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                const VerticalDivider(width: 1),
+                Expanded(
+                  child: Column(
+                    children: [
+                      // 功能按钮
+                      if (selectedDevice != null)
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          color: Colors.grey[50],
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              _buildFeatureButton(Icons.chat, '消息',
+                                  () => setState(() => _selectedTab = 0)),
+                              _buildFeatureButton(Icons.content_paste, '剪贴板',
+                                  () => setState(() => _selectedTab = 1)),
+                              _buildFeatureButton(Icons.folder, '文件',
+                                  () => setState(() => _selectedTab = 2)),
+                              _buildFeatureButton(
+                                  Icons.attach_file, '发文件', _sendFile),
+                            ],
+                          ),
+                        ),
+
+                      // 内容区域
+                      Expanded(
+                        child: selectedDevice == null
+                            ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(Icons.link_off,
+                                        size: 64, color: Colors.grey),
+                                    const SizedBox(height: 16),
+                                    const Text('请先连接设备',
+                                        style: TextStyle(
+                                            color: Colors.grey, fontSize: 18)),
+                                  ],
+                                ),
+                              )
+                            : _buildContentPanel(),
+                      ),
+
+                      // 消息输入框（始终显示）
+                      if (selectedDevice != null)
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[100],
+                            border: Border(
+                                top: BorderSide(color: Colors.grey[300]!)),
+                          ),
+                          child: Row(
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.attach_file),
+                                onPressed: _sendFile,
+                                tooltip: '发送文件',
+                              ),
+                              Expanded(
+                                child: TextField(
+                                  controller: _messageController,
+                                  decoration: const InputDecoration(
+                                    hintText: '输入消息...',
+                                    border: OutlineInputBorder(),
+                                    contentPadding:
+                                        EdgeInsets.symmetric(horizontal: 12),
+                                  ),
+                                  onSubmitted: (_) => _sendText(),
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.send),
+                                onPressed: _sendText,
+                                tooltip: '发送',
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const VerticalDivider(width: 1),
+                SizedBox(
+                  width: 250,
+                  child: Column(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        color: Colors.grey[100],
+                        child: const Row(
+                          children: [
+                            Icon(Icons.history),
+                            SizedBox(width: 8),
+                            Text('传输历史',
+                                style: TextStyle(fontWeight: FontWeight.bold)),
                           ],
                         ),
                       ),
-                  ],
-                ),
-              ),
-              const VerticalDivider(width: 1),
-              
-              SizedBox(
-                width: 250,
-                child: Column(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      color: Colors.grey[100],
-                      child: const Row(
-                        children: [
-                          Icon(Icons.history),
-                          SizedBox(width: 8),
-                          Text('传输历史', style: TextStyle(fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                    ),
-                    Expanded(
-                      child: _transferHistory.isEmpty
-                          ? const Center(
-                              child: Text('暂无传输记录',
-                                style: TextStyle(color: Colors.grey),
-                              ),
-                            )
-                          : ListView.builder(
-                              itemCount: _transferHistory.length,
-                              itemBuilder: (context, index) {
-                                final item = _transferHistory[index];
-                                return ListTile(
-                                  leading: Icon(
-                                    item['direction'] == '发送' 
-                                        ? Icons.upload 
-                                        : Icons.download,
-                                    color: Colors.blue,
-                                  ),
-                                  title: Text(item['name'], maxLines: 1, overflow: TextOverflow.ellipsis),
-                                  subtitle: Text('${item['size']} • ${item['time']}'),
-                                  trailing: Text(
-                                    item['status'],
-                                    style: TextStyle(
-                                      color: item['status'] == '完成' ? Colors.green : Colors.orange,
+                      Expanded(
+                        child: _transferHistory.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  '暂无传输记录',
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: _transferHistory.length,
+                                itemBuilder: (context, index) {
+                                  final item = _transferHistory[index];
+                                  return ListTile(
+                                    leading: Icon(
+                                      item['direction'] == '发送'
+                                          ? Icons.upload
+                                          : Icons.download,
+                                      color: Colors.blue,
                                     ),
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
+                                    title: Text(item['name'],
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis),
+                                    subtitle: Text(
+                                        '${item['size']} • ${item['time']}'),
+                                    trailing: Text(
+                                      item['status'],
+                                      style: TextStyle(
+                                        color: item['status'] == '完成'
+                                            ? Colors.green
+                                            : Colors.orange,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ],
       ),
@@ -945,9 +971,8 @@ class _HomePageState extends State<HomePage> {
       itemBuilder: (context, index) {
         final msg = _messages[index];
         return Align(
-          alignment: msg['isMine'] 
-              ? Alignment.centerRight 
-              : Alignment.centerLeft,
+          alignment:
+              msg['isMine'] ? Alignment.centerRight : Alignment.centerLeft,
           child: Container(
             margin: const EdgeInsets.symmetric(vertical: 4),
             padding: const EdgeInsets.all(12),
@@ -989,7 +1014,8 @@ class _HomePageState extends State<HomePage> {
             children: [
               const Icon(Icons.content_paste, size: 20),
               const SizedBox(width: 8),
-              const Text('剪贴板', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Text('剪贴板',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const Spacer(),
               IconButton(
                 icon: const Icon(Icons.refresh),
@@ -1031,7 +1057,7 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 8),
           const Text('💡 手机发送的剪贴板内容会自动显示在这里',
-            style: TextStyle(color: Colors.grey, fontSize: 12)),
+              style: TextStyle(color: Colors.grey, fontSize: 12)),
         ],
       ),
     );
@@ -1047,7 +1073,8 @@ class _HomePageState extends State<HomePage> {
             children: [
               const Icon(Icons.folder, size: 20),
               const SizedBox(width: 8),
-              const Text('文件管理', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Text('文件管理',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const Spacer(),
               ElevatedButton.icon(
                 onPressed: _sendFile,
@@ -1063,10 +1090,11 @@ class _HomePageState extends State<HomePage> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(Icons.folder_open, size: 64, color: Colors.grey),
+                        const Icon(Icons.folder_open,
+                            size: 64, color: Colors.grey),
                         const SizedBox(height: 8),
                         const Text('暂无文件',
-                          style: TextStyle(color: Colors.grey)),
+                            style: TextStyle(color: Colors.grey)),
                         const SizedBox(height: 16),
                         ElevatedButton.icon(
                           onPressed: _sendFile,
@@ -1088,16 +1116,18 @@ class _HomePageState extends State<HomePage> {
                             size: 40,
                           ),
                           title: Text(item['name']),
-                          subtitle: Text('${item['size']} • ${item['time']} • ${item['direction']}'),
-                          trailing: item['status'] == '完成' && item['path'] != null
-                              ? IconButton(
-                                  icon: const Icon(Icons.folder_open),
-                                  onPressed: () {
-                                    Process.run('xdg-open', [item['path']]);
-                                  },
-                                  tooltip: '打开位置',
-                                )
-                              : null,
+                          subtitle: Text(
+                              '${item['size']} • ${item['time']} • ${item['direction']}'),
+                          trailing:
+                              item['status'] == '完成' && item['path'] != null
+                                  ? IconButton(
+                                      icon: const Icon(Icons.folder_open),
+                                      onPressed: () {
+                                        Process.run('xdg-open', [item['path']]);
+                                      },
+                                      tooltip: '打开位置',
+                                    )
+                                  : null,
                         ),
                       );
                     },
@@ -1155,10 +1185,12 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: _selectedTab == 0 && label == '消息' || 
-                               _selectedTab == 1 && label == '剪贴板' || 
-                               _selectedTab == 2 && label == '文件'
-                ? Colors.blue[700] : Colors.blue),
+            Icon(icon,
+                color: _selectedTab == 0 && label == '消息' ||
+                        _selectedTab == 1 && label == '剪贴板' ||
+                        _selectedTab == 2 && label == '文件'
+                    ? Colors.blue[700]
+                    : Colors.blue),
             const SizedBox(height: 4),
             Text(label, style: const TextStyle(fontSize: 12)),
           ],

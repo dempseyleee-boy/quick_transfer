@@ -60,11 +60,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final List<Map<String, dynamic>> _transferHistory = [];
   bool _isConnected = false;
   Timer? _pollTimer;
+  HttpServer? _httpServer;
   String? _lastClipboard;
-  
+
   // 当前选中的标签页: 0=消息, 1=剪贴板, 2=文件
   int _selectedTab = 0;
-  
+
   // 已保存的设备列表
   List<Device> _savedDevices = [];
 
@@ -76,6 +77,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _getDeviceName();
     _getLocalIP();
     _loadSavedDevices();
+    _startServer();
     _startPolling();
     _startAutoConnect();
     _startClipboardMonitor();
@@ -85,6 +87,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
+    _httpServer?.close();
     _messageController.dispose();
     _clipboardController.dispose();
     _ipController.dispose();
@@ -145,9 +148,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final prefs = await SharedPreferences.getInstance();
       final savedList = prefs.getStringList('saved_devices') ?? [];
-      
+
       // 检查是否已存在
-      final exists = savedList.any((s) => s.startsWith('${device.ip}|'));
+      final exists = savedList.any((s) {
+        final parts = s.split('|');
+        return parts.length >= 2 && parts[1] == device.ip;
+      });
       if (!exists) {
         savedList.add('${device.name}|${device.ip}');
         await prefs.setStringList('saved_devices', savedList);
@@ -172,12 +178,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _tryAutoConnect() async {
     for (var device in _savedDevices) {
       if (!mounted || _isConnected) break;
-      
+
       try {
-        final result = await http.get(
-          Uri.parse('http://${device.ip}:8765/api/status'),
-        ).timeout(const Duration(milliseconds: 500));
-        
+        final result = await http
+            .get(
+              Uri.parse('http://${device.ip}:8765/api/status'),
+            )
+            .timeout(const Duration(milliseconds: 500));
+
         if (result.statusCode == 200) {
           await _connectToDevice(device);
           break;
@@ -198,7 +206,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _checkClipboard() async {
     try {
       final data = await Clipboard.getData(Clipboard.kTextPlain);
-      if (data?.text != null && data!.text != _lastClipboard && data.text!.isNotEmpty) {
+      if (data?.text != null &&
+          data!.text != _lastClipboard &&
+          data.text!.isNotEmpty) {
         setState(() {
           _clipboardController.text = data.text!;
         });
@@ -216,19 +226,88 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
+  Future<void> _startServer() async {
+    try {
+      _httpServer = await HttpServer.bind(InternetAddress.anyIPv4, 8765);
+      await for (final request in _httpServer!) {
+        _handleRequest(request);
+      }
+    } catch (e) {
+      print('启动手机接收服务失败: $e');
+    }
+  }
+
+  Future<void> _handleRequest(HttpRequest request) async {
+    final uri = request.uri.path;
+    final ip = request.connectionInfo?.remoteAddress.address;
+
+    try {
+      if (uri == '/api/status') {
+        await _writeJson(request, {'name': deviceName, 'type': 'mobile'});
+      } else if (uri == '/api/connect') {
+        final body = await utf8.decodeStream(request);
+        final data = body.isEmpty ? <String, dynamic>{} : jsonDecode(body);
+        final device = Device(
+          name: data['name'] ?? '电脑',
+          ip: ip ?? 'unknown',
+          port: 8765,
+        );
+
+        if (ip != null && ip != 'unknown') {
+          selectedDevice = device;
+          await _saveDevice(device);
+        }
+
+        if (mounted) {
+          setState(() {
+            _isConnected = ip != null;
+            if (!devices.any((d) => d.ip == device.ip)) {
+              devices.add(device);
+            }
+          });
+        }
+
+        await _writeJson(request, {'status': 'ok'});
+      } else if (uri == '/api/send') {
+        final body = await utf8.decodeStream(request);
+        final data = jsonDecode(body) as Map<String, dynamic>;
+        await _handleMessage(data);
+        await _writeJson(request, {'status': 'ok'});
+      } else {
+        request.response.statusCode = 404;
+        await request.response.close();
+      }
+    } catch (e) {
+      print('处理手机接收请求失败: $e');
+      request.response.statusCode = 500;
+      await request.response.close();
+    }
+  }
+
+  Future<void> _writeJson(
+      HttpRequest request, Map<String, dynamic> data) async {
+    request.response.statusCode = 200;
+    request.response.headers
+        .set('Content-Type', 'application/json; charset=utf-8');
+    request.response.write(jsonEncode(data));
+    await request.response.close();
+  }
+
   Future<void> _pollForMessages() async {
     if (selectedDevice == null) return;
-    
+
     try {
-      final response = await http.get(
-        Uri.parse('http://${selectedDevice!.ip}:8765/api/messages'),
-      ).timeout(const Duration(seconds: 2));
-      
+      final response = await http
+          .get(
+            Uri.parse('http://${selectedDevice!.ip}:8765/api/messages'),
+          )
+          .timeout(const Duration(seconds: 2));
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['messages'] != null) {
           for (var msg in data['messages']) {
-            _handleMessage(msg);
+            await _handleMessage(msg);
           }
         }
       }
@@ -239,10 +318,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _searchDevices() async {
     setState(() => isSearching = true);
-    
+
     final networkInfo = NetworkInfo();
     final wifiIP = await networkInfo.getWifiIP();
-    
+
     if (wifiIP == null) {
       setState(() => isSearching = false);
       return;
@@ -251,30 +330,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     currentWifiIP = wifiIP;
     final parts = wifiIP.split('.');
     final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-    
+
     devices.clear();
-    
+
     // 并发搜索
     final futures = <Future>[];
     for (int i = 1; i < 255; i++) {
       if (!mounted) return;
-      
+
       final ip = '$subnet.$i';
       if (ip == wifiIP) continue;
-      
+
       futures.add(_checkDevice(ip));
     }
-    
+
     await Future.wait(futures);
     setState(() => isSearching = false);
   }
 
   Future<void> _checkDevice(String ip) async {
     try {
-      final result = await http.get(
-        Uri.parse('http://$ip:8765/api/status'),
-      ).timeout(const Duration(milliseconds: 100));
-      
+      final result = await http
+          .get(
+            Uri.parse('http://$ip:8765/api/status'),
+          )
+          .timeout(const Duration(milliseconds: 100));
+
       if (result.statusCode == 200) {
         final data = jsonDecode(result.body);
         if (mounted) {
@@ -294,25 +375,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _connectToDevice(Device device) async {
     try {
-      final response = await http.post(
-        Uri.parse('http://${device.ip}:8765/api/connect'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'name': deviceName,
-          'deviceType': 'mobile',
-        }),
-      ).timeout(const Duration(seconds: 5));
-      
+      final response = await http
+          .post(
+            Uri.parse('http://${device.ip}:8765/api/connect'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'name': deviceName,
+              'deviceType': 'mobile',
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
+
       if (response.statusCode == 200) {
         selectedDevice = device;
         setState(() {
           _isConnected = true;
           isSearching = false;
         });
-        
+
         // 保存设备
         await _saveDevice(device);
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('已连接到 ${device.name}')),
@@ -336,9 +419,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _connectToDevice(device);
   }
 
-  void _handleMessage(Map<String, dynamic> msg) {
+  Future<void> _handleMessage(Map<String, dynamic> msg) async {
     final type = msg['type'];
-    
+
     switch (type) {
       case 'text':
         setState(() {
@@ -350,13 +433,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           });
         });
         break;
-        
+
       case 'clipboard':
-        _handleClipboard(msg['content']);
+        await _handleClipboard(msg['content']);
         break;
-        
+
       case 'file':
-        _receiveFile(msg);
+        await _receiveFile(msg);
         break;
     }
   }
@@ -364,11 +447,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _handleClipboard(String content) async {
     await Clipboard.setData(ClipboardData(text: content));
     _lastClipboard = content;
-    
+
     setState(() {
       _clipboardController.text = content;
     });
-    
+
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('剪贴板已同步')),
@@ -378,12 +461,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _sendClipboard() async {
     if (!_isConnected || selectedDevice == null) return;
-    
+
     final text = _clipboardController.text;
     if (text.isEmpty) return;
-    
+
     _lastClipboard = text;
-    
+
     try {
       await http.post(
         Uri.parse('http://${selectedDevice!.ip}:8765/api/send'),
@@ -393,7 +476,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           'content': text,
         }),
       );
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('剪贴板已发送')),
@@ -423,7 +506,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await Clipboard.setData(ClipboardData(text: _clipboardController.text));
       _lastClipboard = _clipboardController.text;
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('已复制到剪贴板')),
@@ -439,12 +522,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final fileName = msg['fileName'];
       final fileSize = msg['fileSize'];
       final base64Data = msg['data'];
-      
+
       final directory = await getExternalStorageDirectory();
       final filePath = p.join(directory!.path, fileName);
       final file = File(filePath);
       await file.writeAsBytes(base64Decode(base64Data));
-      
+
       setState(() {
         _transferHistory.insert(0, {
           'name': fileName,
@@ -455,7 +538,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           'path': filePath,
         });
       });
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('文件已保存到: $filePath')),
@@ -467,8 +550,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _sendText() async {
-    if (_messageController.text.isEmpty || !_isConnected || selectedDevice == null) return;
-    
+    if (_messageController.text.isEmpty ||
+        !_isConnected ||
+        selectedDevice == null) return;
+
     try {
       await http.post(
         Uri.parse('http://${selectedDevice!.ip}:8765/api/send'),
@@ -478,7 +563,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           'content': _messageController.text,
         }),
       );
-      
+
       setState(() {
         _messages.add({
           'from': '我',
@@ -487,7 +572,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           'isMine': true,
         });
       });
-      
+
       _messageController.clear();
     } catch (e) {
       if (mounted) {
@@ -505,14 +590,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       return;
     }
-    
+
     final result = await FilePicker.platform.pickFiles();
     if (result == null || result.files.isEmpty) return;
-    
+
     final file = File(result.files.single.path!);
     final fileName = result.files.single.name;
     final fileSize = result.files.single.size;
-    
+
     setState(() {
       _transferHistory.insert(0, {
         'name': fileName,
@@ -522,11 +607,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'status': '传输中',
       });
     });
-    
+
     try {
       final bytes = await file.readAsBytes();
       final base64Data = base64Encode(bytes);
-      
+
       await http.post(
         Uri.parse('http://${selectedDevice!.ip}:8765/api/send'),
         headers: {'Content-Type': 'application/json'},
@@ -537,14 +622,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           'data': base64Data,
         }),
       );
-      
+
       setState(() {
         final index = _transferHistory.indexWhere((h) => h['name'] == fileName);
         if (index != -1) {
           _transferHistory[index]['status'] = '完成';
         }
       });
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('文件发送成功')),
@@ -563,7 +648,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _formatFileSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
@@ -588,7 +675,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             const SizedBox(height: 16),
             if (_savedDevices.isNotEmpty) ...[
               const Divider(),
-              const Text('已保存的设备:', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text('已保存的设备:',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               SizedBox(
                 height: 120,
@@ -631,6 +719,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final isKeyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
+
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -665,97 +755,108 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       body: Column(
         children: [
           // IP 和状态栏
-          Container(
-            padding: const EdgeInsets.all(12),
-            color: Colors.blue[50],
-            child: Row(
-              children: [
-                const Icon(Icons.wifi, size: 20),
-                const SizedBox(width: 8),
-                Text('我的 IP: ${currentWifiIP ?? "获取中..."}', 
-                  style: const TextStyle(fontWeight: FontWeight.bold)),
-                const Spacer(),
-                if (_savedDevices.isNotEmpty)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Colors.blue[100],
-                      borderRadius: BorderRadius.circular(10),
+          if (!isKeyboardVisible)
+            Container(
+              padding: const EdgeInsets.all(12),
+              color: Colors.blue[50],
+              child: Row(
+                children: [
+                  const Icon(Icons.wifi, size: 20),
+                  const SizedBox(width: 8),
+                  Text('我的 IP: ${currentWifiIP ?? "获取中..."}',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  if (_savedDevices.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.blue[100],
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${_savedDevices.length}个已保存',
+                        style: const TextStyle(fontSize: 12),
+                      ),
                     ),
-                    child: Text(
-                      '${_savedDevices.length}个已保存',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-              ],
+                ],
+              ),
             ),
-          ),
-          
+
           // 设备列表
-          Container(
-            padding: const EdgeInsets.all(16),
-            color: Colors.grey[100],
-            child: Row(
-              children: [
-                const Icon(Icons.computer),
-                const SizedBox(width: 8),
-                const Text('可用设备', style: TextStyle(fontWeight: FontWeight.bold)),
-                const Spacer(),
-                if (isSearching)
-                  const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-              ],
-            ),
-          ),
-          SizedBox(
-            height: 80,
-            child: devices.isEmpty && _savedDevices.isEmpty
-                ? const Center(
-                    child: Text('未发现设备\n点击右上角手动连接',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey),
+          if (!isKeyboardVisible)
+            Container(
+              padding: const EdgeInsets.all(16),
+              color: Colors.grey[100],
+              child: Row(
+                children: [
+                  const Icon(Icons.computer),
+                  const SizedBox(width: 8),
+                  const Text('可用设备',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  if (isSearching)
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
                     ),
-                  )
-                : ListView(
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    children: [
-                      // 已保存的设备
-                      ..._savedDevices.map((device) => _buildDeviceChip(device, true)),
-                      // 搜索到的设备
-                      ...devices.where((d) => !_savedDevices.any((s) => s.ip == d.ip))
-                          .map((device) => _buildDeviceChip(device, false)),
-                    ],
-                  ),
-          ),
-          
+                ],
+              ),
+            ),
+          if (!isKeyboardVisible)
+            SizedBox(
+              height: 80,
+              child: devices.isEmpty && _savedDevices.isEmpty
+                  ? const Center(
+                      child: Text(
+                        '未发现设备\n点击右上角手动连接',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    )
+                  : ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      children: [
+                        // 已保存的设备
+                        ..._savedDevices
+                            .map((device) => _buildDeviceChip(device, true)),
+                        // 搜索到的设备
+                        ...devices
+                            .where(
+                                (d) => !_savedDevices.any((s) => s.ip == d.ip))
+                            .map((device) => _buildDeviceChip(device, false)),
+                      ],
+                    ),
+            ),
+
           // 功能按钮
-          if (_isConnected)
+          if (_isConnected && !isKeyboardVisible)
             Container(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  _buildFeatureButton(Icons.chat, '消息', () => setState(() => _selectedTab = 0)),
-                  _buildFeatureButton(Icons.content_paste, '剪贴板', () => setState(() => _selectedTab = 1)),
-                  _buildFeatureButton(Icons.folder, '文件', () => setState(() => _selectedTab = 2)),
+                  _buildFeatureButton(
+                      Icons.chat, '消息', () => setState(() => _selectedTab = 0)),
+                  _buildFeatureButton(Icons.content_paste, '剪贴板',
+                      () => setState(() => _selectedTab = 1)),
+                  _buildFeatureButton(Icons.folder, '文件',
+                      () => setState(() => _selectedTab = 2)),
                   _buildFeatureButton(Icons.share, '发文件', _sendFile),
                 ],
               ),
             ),
-          
+
           const Divider(height: 1),
-          
+
           // 内容区域
           Expanded(
-            child: !_isConnected
-                ? _buildDisconnectedView()
-                : _buildContentPanel(),
+            child:
+                !_isConnected ? _buildDisconnectedView() : _buildContentPanel(),
           ),
-          
+
           // 消息输入框
           if (_isConnected)
             Container(
@@ -806,7 +907,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         decoration: BoxDecoration(
           color: isSelected ? Colors.blue[50] : Colors.white,
           border: Border.all(
-            color: isSelected ? Colors.blue : isSaved ? Colors.green : Colors.grey[300]!,
+            color: isSelected
+                ? Colors.blue
+                : isSaved
+                    ? Colors.green
+                    : Colors.grey[300]!,
             width: isSelected ? 2 : 1,
           ),
           borderRadius: BorderRadius.circular(12),
@@ -814,13 +919,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.computer, 
-              color: isSelected ? Colors.blue : Colors.grey[600]),
+            Icon(Icons.computer,
+                color: isSelected ? Colors.blue : Colors.grey[600]),
             const SizedBox(height: 4),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                if (isSaved) 
+                if (isSaved)
                   const Icon(Icons.star, size: 12, color: Colors.amber),
                 Flexible(
                   child: Text(
@@ -828,7 +933,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                      fontWeight:
+                          isSelected ? FontWeight.bold : FontWeight.normal,
                       fontSize: 12,
                     ),
                   ),
@@ -843,8 +949,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Widget _buildFeatureButton(IconData icon, String label, VoidCallback onTap) {
     final isSelected = (_selectedTab == 0 && label == '消息') ||
-                       (_selectedTab == 1 && label == '剪贴板') ||
-                       (_selectedTab == 2 && label == '文件');
+        (_selectedTab == 1 && label == '剪贴板') ||
+        (_selectedTab == 2 && label == '文件');
     return GestureDetector(
       onTap: onTap,
       child: Column(
@@ -873,7 +979,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const Icon(Icons.cloud_off, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
           const Text('等待连接...',
-            style: TextStyle(color: Colors.grey, fontSize: 18)),
+              style: TextStyle(color: Colors.grey, fontSize: 18)),
           const SizedBox(height: 8),
           TextButton.icon(
             onPressed: _showManualConnectDialog,
@@ -911,16 +1017,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         child: Text('暂无消息', style: TextStyle(color: Colors.grey)),
       );
     }
-    
+
     return ListView.builder(
       padding: const EdgeInsets.all(16),
       itemCount: _messages.length,
       itemBuilder: (context, index) {
         final msg = _messages[index];
         return Align(
-          alignment: msg['isMine'] 
-              ? Alignment.centerRight 
-              : Alignment.centerLeft,
+          alignment:
+              msg['isMine'] ? Alignment.centerRight : Alignment.centerLeft,
           child: Container(
             margin: const EdgeInsets.symmetric(vertical: 4),
             padding: const EdgeInsets.all(12),
@@ -962,7 +1067,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             children: [
               const Icon(Icons.content_paste, size: 20),
               const SizedBox(width: 8),
-              const Text('剪贴板', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Text('剪贴板',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const Spacer(),
               IconButton(
                 icon: const Icon(Icons.refresh),
@@ -1004,7 +1110,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 8),
           const Text('💡 电脑发送的剪贴板内容会自动显示在这里',
-            style: TextStyle(color: Colors.grey, fontSize: 12)),
+              style: TextStyle(color: Colors.grey, fontSize: 12)),
         ],
       ),
     );
@@ -1020,7 +1126,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             children: [
               const Icon(Icons.folder, size: 20),
               const SizedBox(width: 8),
-              const Text('文件管理', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Text('文件管理',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const Spacer(),
               ElevatedButton.icon(
                 onPressed: _sendFile,
@@ -1036,9 +1143,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(Icons.folder_open, size: 64, color: Colors.grey),
+                        const Icon(Icons.folder_open,
+                            size: 64, color: Colors.grey),
                         const SizedBox(height: 8),
-                        const Text('暂无文件', style: TextStyle(color: Colors.grey)),
+                        const Text('暂无文件',
+                            style: TextStyle(color: Colors.grey)),
                         const SizedBox(height: 16),
                         ElevatedButton.icon(
                           onPressed: _sendFile,
@@ -1060,11 +1169,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             size: 40,
                           ),
                           title: Text(item['name']),
-                          subtitle: Text('${item['size']} • ${item['time']} • ${item['direction']}'),
+                          subtitle: Text(
+                              '${item['size']} • ${item['time']} • ${item['direction']}'),
                           trailing: Text(
                             item['status'],
                             style: TextStyle(
-                              color: item['status'] == '完成' ? Colors.green : Colors.orange,
+                              color: item['status'] == '完成'
+                                  ? Colors.green
+                                  : Colors.orange,
                             ),
                           ),
                         ),

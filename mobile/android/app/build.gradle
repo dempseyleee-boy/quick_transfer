@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.quicktransfer.quick_transfer_mobile"
-    compileSdk = 34
+    compileSdk = 35
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
