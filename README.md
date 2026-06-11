@@ -21,8 +21,11 @@ files between a desktop computer and a phone on the same network.
 
 ## Getting Started
 
-1. Install and start Quick Transfer on the Linux desktop.
-2. Install and start the Android app.
+Download release packages from the repository's GitHub Releases page. Packages
+stored directly in the source tree are not used.
+
+1. Install and start Quick Transfer on the Linux or Windows desktop.
+2. Install and start the signed Android app.
 3. Keep both devices on the same network.
 4. Select the discovered device or enter its IP address manually.
 5. Open the appropriate tab to send a message, clipboard text, or file.
@@ -67,3 +70,4 @@ curl http://<phone-ip>:8765/api/status
 ## Documentation
 
 - [Cross-platform expansion guide](docs/platform-expansion-guide.md)
+- [Release guide](docs/releasing.md)
