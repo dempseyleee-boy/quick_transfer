@@ -29,6 +29,8 @@ grep -Eq 'flutter build appbundle --release' "$workflow_file" ||
   fail "release workflow does not build an AAB"
 grep -Eq 'windows.*\.zip|quick-transfer-windows' "$workflow_file" ||
   fail "release workflow does not package the Windows bundle"
+grep -Eq 'runs-on:[[:space:]]*windows-2022' "$workflow_file" ||
+  fail "Windows build is not pinned to the Flutter-compatible runner"
 grep -Eq 'dpkg-deb' "$workflow_file" ||
   fail "release workflow does not package a Debian release"
 
