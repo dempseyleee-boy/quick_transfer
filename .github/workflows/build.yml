@@ -18,7 +18,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Verify release configuration
         run: bash tool/verify_release_config.sh
@@ -32,7 +32,7 @@ jobs:
   test-desktop:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: subosito/flutter-action@v2
         with:
@@ -54,7 +54,7 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: subosito/flutter-action@v2
         with:
@@ -71,7 +71,7 @@ jobs:
     needs: [verify, test-desktop]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: subosito/flutter-action@v2
         with:
@@ -114,7 +114,7 @@ jobs:
           dpkg-deb --build --root-owner-group deb "quick-transfer_${VERSION}_amd64.deb"
           sha256sum "quick-transfer_${VERSION}_amd64.deb" > "quick-transfer_${VERSION}_amd64.deb.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: quick-transfer-linux-${{ steps.version.outputs.value }}-amd64
           path: |
@@ -125,7 +125,7 @@ jobs:
     needs: [verify]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: subosito/flutter-action@v2
         with:
@@ -154,7 +154,7 @@ jobs:
           "$($hash.Hash.ToLower())  quick-transfer_${{ steps.version.outputs.value }}_windows_x64.zip" |
             Out-File quick-transfer_${{ steps.version.outputs.value }}_windows_x64.zip.sha256 -Encoding ascii
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: quick-transfer-windows-${{ steps.version.outputs.value }}-x64
           path: |
@@ -169,7 +169,7 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: subosito/flutter-action@v2
         with:
@@ -208,7 +208,7 @@ jobs:
           cp build/app/outputs/bundle/release/app-release.aab "quick-transfer_${{ steps.version.outputs.value }}_android.aab"
           sha256sum quick-transfer_${{ steps.version.outputs.value }}_android.* > quick-transfer_${{ steps.version.outputs.value }}_android.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: quick-transfer-android-${{ steps.version.outputs.value }}
           path: |
@@ -223,7 +223,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
