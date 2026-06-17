@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:quick_transfer_mobile/transfer_files.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:network_info_plus/network_info_plus.dart';
@@ -524,13 +525,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final base64Data = msg['data'];
 
       final directory = await getExternalStorageDirectory();
-      final filePath = p.join(directory!.path, fileName);
+      if (directory == null) {
+        throw const FileSystemException('无法找到保存目录');
+      }
+      final filePath = await nextAvailableFilePath(directory.path, fileName);
+      final safeFileName = p.basename(filePath);
       final file = File(filePath);
       await file.writeAsBytes(base64Decode(base64Data));
 
       setState(() {
         _transferHistory.insert(0, {
-          'name': fileName,
+          'name': safeFileName,
           'size': _formatFileSize(fileSize),
           'direction': '接收',
           'time': DateTime.now().toString().substring(11, 19),

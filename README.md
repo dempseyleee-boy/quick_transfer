@@ -1,12 +1,12 @@
 # Quick Transfer
 
-Quick Transfer is a local network transfer app for Linux and Android. This
+Quick Transfer is a local network transfer app for Linux, Windows, and Android. This
 first release provides a simple way to exchange messages, clipboard text, and
 files between a desktop computer and a phone on the same network.
 
 ## Features
 
-- Linux desktop and Android applications
+- Linux/Windows desktop and Android applications
 - Automatic device discovery on the local network
 - Manual connection by IP address
 - Text message and clipboard transfer
@@ -15,7 +15,7 @@ files between a desktop computer and a phone on the same network.
 
 ## Requirements
 
-- Linux desktop
+- Linux or Windows desktop
 - Android phone
 - Both devices connected to the same LAN or Wi-Fi network
 
@@ -39,6 +39,13 @@ Build the Linux desktop application:
 ```bash
 flutter pub get
 flutter build linux
+```
+
+Build the Windows desktop application:
+
+```powershell
+flutter pub get
+flutter build windows --release
 ```
 
 Build the Android application:

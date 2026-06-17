@@ -7,6 +7,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:quick_transfer_desktop/desktop_platform.dart';
+import 'package:quick_transfer_desktop/transfer_files.dart';
 import 'package:quick_transfer_desktop/transfer_queue.dart';
 
 void main() {
@@ -19,7 +21,7 @@ class QuickTransferDesktop extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '快传 - Ubuntu 端',
+      title: DesktopPlatform.appTitle,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
@@ -199,20 +201,11 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _getLocalIP() async {
     try {
-      final interfaces =
-          await NetworkInterface.list(type: InternetAddressType.IPv4);
-      for (var interface in interfaces) {
-        for (var addr in interface.addresses) {
-          if (addr.address.startsWith('192.168.') ||
-              addr.address.startsWith('10.')) {
-            setState(() {
-              localIP = addr.address;
-            });
-            break;
-          }
-        }
-        if (localIP != null) break;
-      }
+      final ip = await findPreferredLocalIPv4();
+      if (ip == null) return;
+      setState(() {
+        localIP = ip;
+      });
     } catch (e) {
       print('获取IP失败: $e');
     }
@@ -240,8 +233,9 @@ class _HomePageState extends State<HomePage> {
         request.response.statusCode = 200;
         request.response.headers
             .set('Content-Type', 'application/json; charset=utf-8');
-        request.response
-            .write(jsonEncode({'name': 'Ubuntu PC', 'type': 'desktop'}));
+        request.response.write(
+          jsonEncode({'name': DesktopPlatform.deviceName, 'type': 'desktop'}),
+        );
         await request.response.close();
       } else if (uri == '/api/connect') {
         // 手机连接
@@ -365,12 +359,16 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _receiveFile(Map<String, dynamic> msg) async {
     try {
-      final fileName = msg['fileName'];
       final fileSize = msg['fileSize'];
       final base64Data = msg['data'];
 
       final downloadsDir = await getDownloadsDirectory();
-      final filePath = p.join(downloadsDir!.path, fileName);
+      if (downloadsDir == null) {
+        throw const FileSystemException('无法找到下载目录');
+      }
+      final filePath =
+          await nextAvailableFilePath(downloadsDir.path, msg['fileName']);
+      final fileName = p.basename(filePath);
       final file = File(filePath);
       await file.writeAsBytes(base64Decode(base64Data));
 
@@ -566,6 +564,17 @@ class _HomePageState extends State<HomePage> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
+  Future<void> _openReceivedFileLocation(String path) async {
+    try {
+      await revealPathInFileManager(path);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('打开位置失败: $e')),
+      );
+    }
+  }
+
   void _showManualConnectDialog() {
     showDialog(
       context: context,
@@ -681,7 +690,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: Row(
           children: [
-            const Text('快传 - Ubuntu 端'),
+            Text(DesktopPlatform.appTitle),
             const SizedBox(width: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -1122,9 +1131,8 @@ class _HomePageState extends State<HomePage> {
                               item['status'] == '完成' && item['path'] != null
                                   ? IconButton(
                                       icon: const Icon(Icons.folder_open),
-                                      onPressed: () {
-                                        Process.run('xdg-open', [item['path']]);
-                                      },
+                                      onPressed: () =>
+                                          _openReceivedFileLocation(item['path']),
                                       tooltip: '打开位置',
                                     )
                                   : null,
