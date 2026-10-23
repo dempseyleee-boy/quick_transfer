@@ -4,7 +4,7 @@ Quick Transfer release packages are produced by GitHub Actions from version
 tags. Do not commit APK, AAB, Debian, zip, keystore, or signing-property files
 to the repository.
 
-Windows releases are distributed as zip bundles attached to GitHub Releases.
+Windows releases include a setup EXE installer and a portable ZIP bundle attached to GitHub Releases.
 Do not publish only `quick_transfer.exe`; the Flutter runtime files next to it
 are required. GitHub Packages is not used for these desktop binaries because
 release assets are easier for users to download and match the existing Linux
@@ -54,6 +54,8 @@ GitHub Actions builds the Windows x64 bundle on `windows-2022` and uploads:
 
 - `quick-transfer_<version>_windows_x64.zip`
 - `quick-transfer_<version>_windows_x64.zip.sha256`
+- `quick-transfer_<version>_windows_x64_setup.exe`
+- `quick-transfer_<version>_windows_x64_setup.exe.sha256`
 
 For a local package:
 
@@ -68,7 +70,16 @@ $hash = Get-FileHash quick-transfer_2.0.0_windows_x64.zip -Algorithm SHA256
   Out-File quick-transfer_2.0.0_windows_x64.zip.sha256 -Encoding ascii
 ```
 
-Upload the zip and checksum as GitHub Release assets. Do not commit them to the
+For a local EXE installer, install Inno Setup 6 and run its compiler after building Flutter:
+
+```powershell
+$bundle = (Resolve-Path 'build/windows/x64/runner/Release').Path
+$output = (Get-Location).Path
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=2.0.0 "/DSourceDir=$bundle" "/DOutputDir=$output" windows/installer.iss
+```
+
+The installer installs the full Flutter bundle per-user and requires no administrator privileges.
+Upload the installer, zip, and their checksums as GitHub Release assets. Do not commit them to the
 source tree.
 
 ## Publish A Release
@@ -97,7 +108,7 @@ The tag workflow publishes:
 - Signed Android APK.
 - Signed Android AAB.
 - Linux amd64 Debian package.
-- Windows x64 zip bundle.
+- Windows x64 setup EXE installer and portable zip bundle.
 - SHA-256 checksum files.
 
 The release workflow fails rather than publishing an unsigned or Debug-signed
