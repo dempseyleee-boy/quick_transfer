@@ -31,7 +31,7 @@ grep -Eq 'windows.*\.zip|quick-transfer-windows' "$workflow_file" ||
   fail "release workflow does not package the Windows bundle"
 grep -Eq 'runs-on:[[:space:]]*windows-2022' "$workflow_file" ||
   fail "Windows build is not pinned to the Flutter-compatible runner"
-grep -Eq 'windows_x64_setup\\.exe' "$workflow_file" ||
+grep -Fq 'windows_x64_setup.exe' "$workflow_file" ||
   fail "release workflow does not publish the Windows EXE installer"
 test -f "$root_dir/windows/installer.iss" ||
   fail "Windows installer definition is missing"
