@@ -32,8 +32,10 @@ stored directly in the source tree are not used.
 
 ## Windows Package
 
-Download the Windows x64 zip package from GitHub Releases, extract the whole
-folder, then run `quick_transfer.exe`. Keep `quick_transfer.exe`,
+Download the Windows x64 setup EXE from GitHub Releases and run it to install Quick Transfer.
+The installer includes all required Flutter runtime files and creates a Start Menu
+shortcut. Alternatively, download the portable Windows x64 zip package, extract the whole
+folder, then run `quick_transfer.exe`. For the portable package, keep `quick_transfer.exe`,
 `flutter_windows.dll`, and the `data/` directory together; the executable is not
 a standalone single-file app.
 
@@ -66,6 +68,11 @@ Compress-Archive `
   -Path build/windows/x64/runner/Release/* `
   -DestinationPath quick-transfer_2.0.0_windows_x64.zip
 ```
+
+For a Windows EXE installer, install Inno Setup 6 and run `ISCC.exe` against
+`windows/installer.iss`, passing `/DAppVersion=2.0.0`, `/DSourceDir=<absolute path to
+build/windows/x64/runner/Release>`, and `/DOutputDir=<absolute output folder>`.
+GitHub Actions builds both packages when publishing a version tag.
 
 Build the Android application:
 
